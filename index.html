@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gapminder 2018</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    html, body { margin: 0; padding: 0; background: rgb(15, 20, 35); }
+    /* sketch.js sets data-theme when the dark/light toggle is clicked */
+    html[data-theme="light"], html[data-theme="light"] body { background: rgb(244, 246, 251); }
+    main { display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    /* canvas keeps its 1000x700 layout but shrinks to fit narrow screens */
+    canvas { display: block; max-width: 100%; height: auto !important; }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+  <script src="sketch.js"></script>
+</head>
+<body>
+  <main id="gapminder"></main>
+</body>
+</html>
