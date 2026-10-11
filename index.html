@@ -46,12 +46,13 @@
       position: relative; width: 1000px; max-width: 100%; container-type: inline-size;
       display: flex; flex-wrap: wrap; gap: 8px; /* only matters for the narrow-screen layout below */
     }
-    #chart canvas { display: block; flex: 0 0 100%; width: 100% !important; height: auto !important; border-radius: 4px; }
+    #plot { position: relative; flex: 0 0 100%; }
+    #chart canvas { display: block; width: 100% !important; height: auto !important; border-radius: 4px; }
     #chart canvas:focus { outline: none; }
     #chart canvas:focus-visible { outline: 2px solid var(--box-border-active); outline-offset: 2px; }
 
     .chart-control {
-      position: absolute; top: 2cqw; height: 2.8cqw; box-sizing: border-box; margin: 0;
+      position: absolute; z-index: 2; top: 2cqw; height: 2.8cqw; box-sizing: border-box; margin: 0;
       font: 400 max(1.1cqw, 11px) "Space Grotesk", sans-serif;
       color: var(--box-text); background: var(--box-bg);
       border: 1px solid var(--box-border); border-radius: 6px;
@@ -70,12 +71,31 @@
     html[data-theme="light"] #theme-toggle .sun,
     html:not([data-theme="light"]) #theme-toggle .moon { display: none; }
 
+    /* Regions | Life vs. income segmented switch */
+    #view-switch { left: 31cqw; width: 25cqw; padding: 2px; display: flex; gap: 2px; }
+    #view-switch button {
+      flex: 1; border: 0; border-radius: 4px; cursor: pointer; padding: 0;
+      font: inherit; color: var(--box-text); background: transparent;
+    }
+    #view-switch button:hover { background: var(--row-alt); }
+    #view-switch button[aria-pressed="true"] { background: var(--box-border-active); color: var(--bg); font-weight: 500; }
+    #view-switch button:focus-visible { outline: 2px solid var(--box-border-active); outline-offset: 1px; }
+
+    /* invisible hit areas over the canvas legend rows (sketch.js sets each top) */
+    .legend-btn {
+      position: absolute; left: 82.8cqw; width: 16.4cqw; height: 2.2cqw; padding: 0; margin: 0;
+      border: 0; border-radius: 4px; background: transparent; cursor: pointer;
+    }
+    .legend-btn:focus-visible { outline: 2px solid var(--box-border-active); outline-offset: 0; }
+
     /* narrow screens: overlaid controls would be too small to tap, so put them in a row above the chart */
     @container (max-width: 640px) {
       .chart-control { position: static; height: 40px; font-size: 14px; }
       #search { flex: 1; width: auto; padding: 0 12px; }
       #theme-toggle { width: auto; padding: 0 12px; gap: 6px; }
       #theme-toggle svg { width: 16px; height: 16px; }
+      #view-switch { order: 1; flex: 0 0 100%; width: auto; padding: 3px; }
+      #plot { order: 2; }
     }
 
     /* data table: same data in text form for screen readers and anyone who prefers it */
@@ -103,9 +123,12 @@
     <h1 class="sr-only">Gapminder 2018: income and life expectancy by country</h1>
 
     <div id="chart">
-      <!-- the p5 canvas is inserted here by sketch.js -->
       <input id="search" class="chart-control" type="search" placeholder="Search country..."
              aria-label="Search country" aria-describedby="chart-help" autocomplete="off" spellcheck="false">
+      <div id="view-switch" class="chart-control" role="group" aria-label="Colour bubbles by">
+        <button type="button" data-view="regions" aria-pressed="true">Regions</button>
+        <button type="button" data-view="expected" aria-pressed="false">Life vs. income</button>
+      </div>
       <button id="theme-toggle" class="chart-control" type="button">
         <svg class="sun" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
           <circle cx="8" cy="8" r="3" stroke="none"/>
@@ -116,11 +139,16 @@
         </svg>
         <span class="label">Light mode</span>
       </button>
+      <!-- sketch.js puts the p5 canvas and the legend buttons in here -->
+      <div id="plot"></div>
     </div>
 
     <p id="chart-help" class="sr-only">
       Bubble chart of 187 countries in 2018. Horizontal axis: income, GDP per capita in US dollars, on a log scale.
       Vertical axis: life expectancy in years. Bubble size: population. Colour: world region.
+      The "Life vs. income" view instead colours each country by how many years longer or shorter
+      its people live than its income predicts, using a trend line fitted to all countries.
+      In the Regions view, the legend buttons focus one region and mark its population-weighted average.
       Type in the search box to highlight matching countries; press Enter to jump to the first match.
       In the chart, use the arrow keys to move between countries: left and right by income,
       up and down by life expectancy. Home and End go to the poorest and richest country. Escape clears the selection.
@@ -139,6 +167,7 @@
               <th scope="col">Region</th>
               <th scope="col" class="num">Income (GDP per capita, US$)</th>
               <th scope="col" class="num">Life expectancy (years)</th>
+              <th scope="col" class="num">vs. expected for income (years)</th>
               <th scope="col" class="num">Population</th>
             </tr>
           </thead>

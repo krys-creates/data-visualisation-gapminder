@@ -55,6 +55,8 @@ const THEMES = {
     popupTitle: [240, 248, 255],
     popupText: [180, 210, 255],
     focus: [100, 160, 255],
+    trend: [210, 225, 250],
+    neutral: [120, 132, 155],  // "as expected" end of the life-vs-income scale
     bubbleEdge: 0     // how much bubble outlines are darkened (0 = region colour)
   },
   light: {
@@ -71,13 +73,20 @@ const THEMES = {
     popupTitle: [20, 28, 50],
     popupText: [70, 90, 130],
     focus: [60, 120, 230],
+    trend: [40, 55, 90],
+    neutral: [175, 182, 198],
     bubbleEdge: 0.3   // darker outlines so yellow/cyan bubbles read on white
   }
 };
 let themeName = "dark";
 let T = THEMES.dark;
 
-// respect the OS "reduce motion" setting: no pulsing glow
+// "Life vs. income" view: blue = lives longer than its income predicts, orange = shorter
+// (blue/orange stays distinguishable for colour-blind viewers)
+const OVER = "#00bbf9", UNDER = "#fb5607";
+const RES_SCALE = 10;        // residual (years) that gets the full colour
+
+// respect the OS "reduce motion" setting: no pulsing glow, no grow-in, no colour fades
 const reduceMotion = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 //interaction state variables
@@ -85,8 +94,19 @@ let searchCountry = "";      // search typed by user
 let selected = null;         // country picked with the keyboard (or by clicking a bubble)
 let byIncome, byHealth;      // countries sorted for arrow-key navigation
 
+let view = "regions";        // "regions" | "expected"
+let viewLinear = 0;          // transition progress, 0 = region colours, 1 = life-vs-income colours
+let viewT = 0;               // same, eased
+let hoverRegion = null;      // region under the mouse / keyboard in the legend
+let pinnedRegion = null;     // region clicked in the legend
+let introStart = 0;          // millis() when the bubbles start growing in
+
+// life expectancy ~ a + b * ln(income), least-squares fit over all countries
+let fitA = 0, fitB = 0, fitSD = 0;
+let overachievers, underachievers;   // top 3 each way, labelled in the "expected" view
+
 // DOM elements
-let cnv, searchInput, themeButton, announcer;
+let cnv, searchInput, themeButton, announcer, viewButtons, legendButtons;
 
 // p5 loads files asynchronously, so the table is loaded before setup()
 function preload() {
@@ -96,14 +116,16 @@ function preload() {
 //window
 function setup() {
   cnv = createCanvas(1000, 700);
-  cnv.parent("chart");
+  cnv.parent("plot");
   palette = paletteHex.map(h => color(h));
   loadData();
   textFont("Space Grotesk"); // web font from index.html
   textAlign(CENTER, CENTER);
 
   setupAccessibility();
+  setupEnhancements();
   setTheme(initialTheme());
+  introStart = millis();
 }
 
 // saved choice first, otherwise follow the OS setting
@@ -125,9 +147,16 @@ function setTheme(name) {
 }
 
 function draw() {
+  // ease between the two colourings over ~0.4s (time-based, so slow frames don't drag it out)
+  const target = view === "expected" ? 1 : 0;
+  viewLinear = reduceMotion ? target :
+    (target > viewLinear ? min(target, viewLinear + deltaTime / 400) : max(target, viewLinear - deltaTime / 400));
+  viewT = viewLinear * viewLinear * (3 - 2 * viewLinear); // smoothstep
+
   background(...T.bg);
   drawYear();
   drawAxes();
+  if (viewT > 0) drawTrend(viewT);
 
   let hovered = null;
   for (const c of countries) {
@@ -146,6 +175,9 @@ function draw() {
     c.display(active);
   }
 
+  if (view === "regions" && focusedRegion() && searchCountry.length === 0) drawRegionAverage(focusedRegion());
+  if (view === "expected" && viewT > 0.5 && searchCountry.length === 0 && active == null) drawCallouts();
+
   //  glow on hover
   if (active != null) {
     active.displayGlowing();
@@ -157,7 +189,153 @@ function draw() {
     if (keyboardFocus) active.drawPopup(active.x, active.y - active.radius - 8, true);
     else active.drawPopup(mouseX, mouseY - 50, false);
   }
-  drawLegend();
+  if (view === "expected") drawExpectedLegend();
+  else drawLegend();
+}
+
+function focusedRegion() {
+  return hoverRegion || pinnedRegion;
+}
+
+// trend line + a band one standard deviation either side ("typical for its income")
+function drawTrend(alphaScale) {
+  const x1 = 80, x2 = width - 50;
+  const y1 = healthToY(expectedHealth(minIncome)), y2 = healthToY(expectedHealth(maxIncome));
+  const band = healthToY(0) - healthToY(fitSD); // SD in pixels
+
+  // keep the band inside the plot area
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(x1, 50, x2 - x1, height - 130);
+  drawingContext.clip();
+
+  noStroke();
+  fill(...T.trend, 18 * alphaScale);
+  quad(x1, y1 - band, x2, y2 - band, x2, y2 + band, x1, y1 + band);
+
+  stroke(...T.trend, 170 * alphaScale);
+  strokeWeight(1.5);
+  drawingContext.setLineDash([6, 5]);
+  line(x1, y1, x2, y2);
+  drawingContext.setLineDash([]);
+  drawingContext.restore();
+
+  // label sits on the line near the left end, rotated to match it
+  push();
+  translate(x1 + 14, y1 - 8);
+  rotate(atan2(y2 - y1, x2 - x1));
+  noStroke();
+  fill(...T.trend, 200 * alphaScale);
+  textSize(10);
+  textAlign(LEFT, BOTTOM);
+  text("expected for its income", 0, 0);
+  pop();
+}
+
+// population-weighted centre of a region, with crosshairs to both axes
+function drawRegionAverage(region) {
+  let w = 0, lx = 0, hy = 0, n = 0;
+  for (const c of countries) {
+    if (c.region !== region) continue;
+    w += c.ppl; lx += log(c.income) * c.ppl; hy += c.health * c.ppl; n++;
+  }
+  if (w === 0) return;
+  const inc = exp(lx / w), h = hy / w;
+  const x = incomeToX(inc), y = healthToY(h);
+  const clr = palette[regions.indexOf(region) % palette.length];
+
+  stroke(red(clr), green(clr), blue(clr), 150);
+  strokeWeight(1);
+  drawingContext.setLineDash([3, 4]);
+  line(x, y, x, height - 80);
+  line(80, y, x, y);
+  drawingContext.setLineDash([]);
+
+  noFill();
+  stroke(...T.popupTitle);
+  strokeWeight(2);
+  ellipse(x, y, 16, 16);
+  line(x - 4, y, x + 4, y);
+  line(x, y - 4, x, y + 4);
+
+  // label, kept inside the plot
+  const label = "Region average: $" + nfc(round(inc)) + " · " + h.toFixed(1) + " yrs · " + n + " countries";
+  textSize(11);
+  const tw = textWidth(label) + 16;
+  let lxPos = constrain(x + 14, 84, width - 54 - tw);
+  const lyPos = y - 22 < 54 ? y + 12 : y - 22;
+  noStroke();
+  fill(...T.popupBg);
+  rect(lxPos, lyPos - 10, tw, 20, 5);
+  fill(...T.popupTitle);
+  textAlign(LEFT, CENTER);
+  text(label, lxPos + 8, lyPos);
+}
+
+// name the biggest over- and under-performers
+function drawCallouts() {
+  textSize(10);
+  for (const c of [...overachievers, ...underachievers]) {
+    const col = residualColor(c.res);
+    const above = c.res >= 0;
+    const ty = above ? c.y - c.radius - 4 : c.y + c.radius + 4;
+    noStroke();
+    fill(...T.matchLabel);
+    textAlign(CENTER, above ? BOTTOM : TOP);
+    text(c.name, c.x, above ? ty - 11 : ty);
+    fill(col);
+    text(formatYears(c.res), c.x, above ? ty : ty + 11);
+  }
+}
+
+// legend for the "Life vs. income" view: diverging scale + trend key
+function drawExpectedLegend() {
+  const lx = width - 160, top = 300;
+  noStroke();
+  fill(...T.legendHeader);
+  textSize(12);
+  textAlign(LEFT, CENTER);
+  text("LIFE VS. INCOME", lx, top);
+
+  fill(...T.legendText);
+  textSize(10);
+  text("Years above or below what", lx, top + 22);
+  text("the country's income predicts", lx, top + 36);
+
+  // gradient bar
+  const bw = 120, by = top + 58;
+  for (let i = 0; i <= bw; i++) {
+    stroke(residualColor(map(i, 0, bw, -RES_SCALE, RES_SCALE)));
+    line(lx + i, by, lx + i, by + 10);
+  }
+  noStroke();
+  fill(...T.legendText);
+  textAlign(CENTER, TOP);
+  text("−" + RES_SCALE, lx, by + 14);
+  text("0", lx + bw / 2, by + 14);
+  text("+" + RES_SCALE, lx + bw, by + 14);
+  textAlign(LEFT, TOP);
+  fill(UNDER);
+  text("shorter", lx, by + 28);
+  fill(OVER);
+  textAlign(RIGHT, TOP);
+  text("longer", lx + bw, by + 28);
+
+  // trend key
+  const ky = by + 64;
+  stroke(...T.trend, 170);
+  strokeWeight(1.5);
+  drawingContext.setLineDash([6, 5]);
+  line(lx, ky, lx + 24, ky);
+  drawingContext.setLineDash([]);
+  noStroke();
+  fill(...T.legendText);
+  textAlign(LEFT, CENTER);
+  text("expected life expectancy", lx + 32, ky);
+  fill(...T.trend, 40);
+  rect(lx, ky + 14, 24, 12);
+  fill(...T.legendText);
+  text("typical range (±" + fitSD.toFixed(1) + " yrs)", lx + 32, ky + 20);
 }
 
 function loadData() {
@@ -182,6 +360,58 @@ function loadData() {
 
   byIncome = [...countries].sort((a, b) => a.income - b.income);
   byHealth = [...countries].sort((a, b) => a.health - b.health || a.income - b.income);
+
+  // stagger the grow-in from poorest to richest
+  byIncome.forEach((c, i) => { c.introDelay = i / byIncome.length; });
+
+  fitTrend();
+}
+
+// "Preston curve": how long people live given how rich their country is.
+// Each country's residual = years above/below what its income predicts.
+function fitTrend() {
+  const n = countries.length;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const c of countries) {
+    const lx = log(c.income);
+    sx += lx; sy += c.health; sxx += lx * lx; sxy += lx * c.health;
+  }
+  fitB = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+  fitA = (sy - fitB * sx) / n;
+
+  let ss = 0;
+  for (const c of countries) {
+    c.expected = expectedHealth(c.income);
+    c.res = c.health - c.expected;
+    ss += c.res * c.res;
+  }
+  fitSD = sqrt(ss / (n - 2));
+
+  const byRes = [...countries].sort((a, b) => b.res - a.res);
+  overachievers = byRes.slice(0, 3);
+  underachievers = byRes.slice(-3).reverse();
+}
+
+function expectedHealth(income) {
+  return fitA + fitB * log(income);
+}
+
+function incomeToX(income) {
+  return map(log(income), log(minIncome), log(maxIncome), 80, width - 50);
+}
+
+function healthToY(h) {
+  return map(h, 45, 90, height - 80, 50);
+}
+
+// diverging colour for a residual in years
+function residualColor(res) {
+  const t = constrain(res / RES_SCALE, -1, 1);
+  return lerpColor(color(...T.neutral), color(t >= 0 ? OVER : UNDER), abs(t));
+}
+
+function formatYears(res) {
+  return (res >= 0 ? "+" : "−") + abs(res).toFixed(1) + " yrs";
 }
 
 // 2018, faded
@@ -260,19 +490,30 @@ function drawLegend() {
   textSize(12);
   text("REGION", width - 160, legendStartY - 20);
 
+  const focus = focusedRegion();
   for (let i = 0; i < regions.length; i++) {
     const yPos = legendStartY + (i * 22);
     const c = palette[i % palette.length];
+    const dim = focus != null && focus !== regions[i];
 
     // legend: halo + solid  dot
     noStroke();
-    fill(red(c), green(c), blue(c), 50);
+    fill(red(c), green(c), blue(c), dim ? 20 : 50);
     ellipse(width - 160, yPos, 20, 20);
-    fill(c);
+    fill(red(c), green(c), blue(c), dim ? 70 : 255);
     ellipse(width - 160, yPos, 10, 10);
-    fill(...T.legendText);
+    fill(...T.legendText, dim ? 90 : 255);
     textSize(10);
+    textStyle(regions[i] === focus ? BOLD : NORMAL);
     text(regions[i], width - 148, yPos);
+    textStyle(NORMAL);
+  }
+
+  // hint while no region is focused
+  if (focus == null) {
+    fill(...T.legendText, 140);
+    textSize(9);
+    text("click a region to focus", width - 170, legendStartY + regions.length * 22 + 2);
   }
 }
 
@@ -358,6 +599,58 @@ function chartKeydown(e) {
   selectCountry(next);
 }
 
+// ---------- enhancements: view switch + interactive legend ----------
+
+function setupEnhancements() {
+  viewButtons = document.querySelectorAll("#view-switch button");
+  viewButtons.forEach(b => b.addEventListener("click", () => setView(b.dataset.view)));
+
+  // invisible HTML buttons laid over each canvas legend row, so the legend
+  // works with mouse, touch, keyboard and screen readers alike
+  const plot = document.getElementById("plot");
+  legendButtons = regions.map((r, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "legend-btn";
+    b.style.top = ((320 - 11 + i * 22) / 10) + "cqw";
+    b.setAttribute("aria-pressed", "false");
+    b.setAttribute("aria-label", "Focus on " + regionNames[r]);
+    b.addEventListener("mouseenter", () => { hoverRegion = r; });
+    b.addEventListener("mouseleave", () => { hoverRegion = null; });
+    b.addEventListener("focus", () => { hoverRegion = r; });
+    b.addEventListener("blur", () => { hoverRegion = null; });
+    b.addEventListener("click", () => togglePinnedRegion(r));
+    plot.appendChild(b);
+    return b;
+  });
+}
+
+function setView(v) {
+  view = v;
+  if (v !== "regions") { pinnedRegion = null; hoverRegion = null; }
+  viewButtons.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.view === v)));
+  legendButtons.forEach(b => {
+    b.hidden = v !== "regions";
+    b.setAttribute("aria-pressed", "false");
+  });
+  announce(v === "expected"
+    ? "Colouring by life expectancy compared with income. Blue countries live longer than their income predicts, orange shorter. " +
+      "Biggest over-performers: " + overachievers.map(c => c.name + " " + formatYears(c.res)).join(", ") + ". " +
+      "Biggest under-performers: " + underachievers.map(c => c.name + " " + formatYears(c.res)).join(", ") + "."
+    : "Colouring by world region.");
+}
+
+function togglePinnedRegion(r) {
+  pinnedRegion = pinnedRegion === r ? null : r;
+  legendButtons.forEach((b, i) => b.setAttribute("aria-pressed", String(regions[i] === pinnedRegion)));
+  if (pinnedRegion == null) return announce("Showing all regions.");
+  const members = countries.filter(c => c.region === r);
+  const pop = members.reduce((s, c) => s + c.ppl, 0);
+  const avg = members.reduce((s, c) => s + c.health * c.ppl, 0) / pop;
+  announce("Focused on " + regionNames[r] + ": " + members.length + " countries, " +
+    "population-weighted life expectancy " + avg.toFixed(1) + " years.");
+}
+
 // arrow keys step through search matches when there are any, otherwise every country
 function navList(sorted) {
   const matches = sorted.filter(matchesSearch);
@@ -390,7 +683,8 @@ function buildDataTable() {
   for (const c of countries) {
     const tr = document.createElement("tr");
     const cells = [c.name, regionNames[c.region] || c.region,
-      nfc(int(c.income)), formatFloat(c.health), nfc(int(c.ppl))];
+      nfc(int(c.income)), formatFloat(c.health),
+      (c.res >= 0 ? "+" : "−") + abs(c.res).toFixed(1), nfc(int(c.ppl))];
     cells.forEach((v, k) => {
       const td = document.createElement(k === 0 ? "th" : "td");
       if (k === 0) td.scope = "row";
@@ -429,7 +723,9 @@ class Country {
   describe() {
     return this.name + ", " + (regionNames[this.region] || this.region) +
       ". Income $" + nfc(int(this.income)) + " per person, life expectancy " +
-      formatFloat(this.health) + " years, population " + nfc(int(this.ppl)) + ".";
+      formatFloat(this.health) + " years, population " + nfc(int(this.ppl)) + ". " +
+      "That is " + abs(this.res).toFixed(1) + " years " + (this.res >= 0 ? "longer" : "shorter") +
+      " than expected for its income.";
   }
 
   coordUpdate() {
@@ -449,22 +745,34 @@ class Country {
   // +highlights matching search results
   display(hovered) {
     this.coordUpdate();
-    const clr = this.clr;
+    // region colour, blended toward the life-vs-income colour as that view fades in
+    const clr = viewT > 0 ? lerpColor(this.clr, residualColor(this.res), viewT) : this.clr;
+    this.cur = clr;
     const edge = lerpColor(clr, color(0), T.bubbleEdge);
 
     const isMatched = matchesSearch(this);
     const isHovered = (this === hovered);
+    const region = view === "regions" ? focusedRegion() : null;
 
     // Dim  others when hovering or searching, focus mode
     let alphaVal = 180;
-    if (hovered != null && !isHovered) alphaVal = 40;
+    if (region != null && this.region !== region) alphaVal = 25;
+    if (hovered != null && !isHovered) alphaVal = min(alphaVal, 40);
     if (searchCountry.length > 0 && !isMatched) alphaVal = 25;
     if (isMatched) alphaVal = 230;
+
+    // grow in on load, poorest first (ease-out)
+    let grow = 1;
+    if (!reduceMotion) {
+      const t = constrain(((millis() - introStart) / 1000 - this.introDelay * 0.9) / 0.5, 0, 1);
+      grow = 1 - pow(1 - t, 3);
+    }
+    if (grow <= 0) return;
 
     fill(red(clr), green(clr), blue(clr), alphaVal);
     stroke(red(edge), green(edge), blue(edge), alphaVal * 0.6);
     strokeWeight(1);
-    ellipse(this.x, this.y, this.radius * 2, this.radius * 2);
+    ellipse(this.x, this.y, this.radius * 2 * grow, this.radius * 2 * grow);
 
     // Label for search matches so they're easy to spot
     if (isMatched) {
@@ -479,7 +787,7 @@ class Country {
   // pulsate and glow on hover, bubble intercation effect
   displayGlowing() {
     this.coordUpdate();
-    const clr = this.clr;
+    const clr = this.cur || this.clr;
     // gentle pulse (held steady when the user prefers reduced motion)
     const shimmer = reduceMotion ? 0.75 : 0.5 + 0.5 * sin(frameCount * 0.12);
 
@@ -507,8 +815,9 @@ class Country {
   // popup tab for bubbles with info, popup style
   // (ax, ay) = mouse position, or a point just above the bubble when using the keyboard
   drawPopup(ax, ay, fromKeyboard) {
-    const clr = this.clr;
-    let px = ax, py = ay;
+    const clr = this.cur || this.clr;
+    const extra = view === "expected" ? 14 : 0;   // room for the "vs expected" line
+    let px = ax, py = ay - (fromKeyboard ? extra : 0);
     // Keep popup inside canvas
     if (px + 90 > width) px = width - 90;
     if (px - 90 < 0) px = 90;
@@ -518,7 +827,7 @@ class Country {
     stroke(red(clr), green(clr), blue(clr), 180);
     strokeWeight(1.5);
     rectMode(CENTER);
-    rect(px, py - 30, 160, 66, 7);
+    rect(px, py - 30 + extra / 2, 160, 66 + extra, 7);
     rectMode(CORNER);
     // Colored top strip
     noStroke();
@@ -534,5 +843,9 @@ class Country {
     textSize(10);
     text("Inc: $" + int(this.income) + " | Life: " + formatFloat(this.health), px, py - 28);
     text("Ppl:" + nfc(int(this.ppl)), px, py - 14); //nfc comma in number
+    if (extra > 0) {
+      fill(residualColor(this.res));
+      text(formatYears(this.res) + " vs. expected", px, py);
+    }
   }
 }
