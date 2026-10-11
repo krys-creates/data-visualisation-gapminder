@@ -16,6 +16,22 @@ const regions = [
   "C.W. OF IND. STATES", "OCEANIA", "NEAR EAST", "NORTHERN AMERICA", "BALTICS", "EAST ASIA"
 ];
 
+// spelled-out region names for screen readers and the data table
+const regionNames = {
+  "ASIA (EX. NEAR EAST)": "Asia (excluding Near East)",
+  "EASTERN EUROPE": "Eastern Europe",
+  "NORTHERN AFRICA": "Northern Africa",
+  "WESTERN EUROPE": "Western Europe",
+  "SUB-SAHARAN AFRICA": "Sub-Saharan Africa",
+  "LATIN AMER. & CARIB": "Latin America & Caribbean",
+  "C.W. OF IND. STATES": "Commonwealth of Independent States",
+  "OCEANIA": "Oceania",
+  "NEAR EAST": "Near East",
+  "NORTHERN AMERICA": "Northern America",
+  "BALTICS": "Baltics",
+  "EAST ASIA": "East Asia"
+};
+
 const paletteHex = [
   "#ff595e", "#ffca3a", "#8ac926", "#1982c4", "#6a4c93", "#f15bb5",
   "#fee440", "#00bbf9", "#00f5d4", "#9b5de5", "#f15bb5", "#fb5607"
@@ -23,6 +39,7 @@ const paletteHex = [
 let palette; // p5.Color objects, built in setup()
 
 // colours for everything that isn't a bubble, per theme ([r, g, b, alpha?])
+// (the search box + toggle are HTML now; their colours live in index.html)
 const THEMES = {
   dark: {
     bg: [15, 20, 35],
@@ -33,15 +50,11 @@ const THEMES = {
     gridLabel: [140, 165, 200],
     legendHeader: [200, 220, 255, 180],
     legendText: [180, 200, 230],
-    boxBg: [30, 40, 65, 220],
-    boxBorder: [60, 80, 120],
-    boxBorderActive: [100, 160, 255],
-    boxText: [180, 200, 230],
-    boxPlaceholder: [80, 100, 140],
     matchLabel: [255, 255, 255, 200],
     popupBg: [20, 28, 50, 230],
     popupTitle: [240, 248, 255],
     popupText: [180, 210, 255],
+    focus: [100, 160, 255],
     bubbleEdge: 0     // how much bubble outlines are darkened (0 = region colour)
   },
   light: {
@@ -50,31 +63,30 @@ const THEMES = {
     axis: [150, 165, 190],
     axisTitle: [70, 85, 115],
     grid: [120, 140, 180, 60],
-    gridLabel: [100, 115, 145],
-    legendHeader: [40, 55, 85, 200],
+    gridLabel: [85, 100, 130],     // >= 4.5:1 contrast on the light background
+    legendHeader: [40, 55, 85, 220],
     legendText: [60, 75, 105],
-    boxBg: [255, 255, 255, 235],
-    boxBorder: [195, 205, 225],
-    boxBorderActive: [60, 120, 230],
-    boxText: [40, 55, 85],
-    boxPlaceholder: [140, 152, 175],
     matchLabel: [20, 25, 40, 220],
     popupBg: [255, 255, 255, 245],
     popupTitle: [20, 28, 50],
     popupText: [70, 90, 130],
+    focus: [60, 120, 230],
     bubbleEdge: 0.3   // darker outlines so yellow/cyan bubbles read on white
   }
 };
 let themeName = "dark";
 let T = THEMES.dark;
 
-// UI boxes
-const SEARCH = { x: 90, y: 20, w: 200, h: 28 };
-const TOGGLE = { x: 840, y: 20, w: 110, h: 28 };
+// respect the OS "reduce motion" setting: no pulsing glow
+const reduceMotion = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 //interaction state variables
 let searchCountry = "";      // search typed by user
-let searchActive = false;    // is the search box focused?
+let selected = null;         // country picked with the keyboard (or by clicking a bubble)
+let byIncome, byHealth;      // countries sorted for arrow-key navigation
+
+// DOM elements
+let cnv, searchInput, themeButton, announcer;
 
 // p5 loads files asynchronously, so the table is loaded before setup()
 function preload() {
@@ -83,12 +95,14 @@ function preload() {
 
 //window
 function setup() {
-  const cnv = createCanvas(1000, 700);
-  cnv.parent("gapminder");
+  cnv = createCanvas(1000, 700);
+  cnv.parent("chart");
   palette = paletteHex.map(h => color(h));
   loadData();
   textFont("Space Grotesk"); // web font from index.html
   textAlign(CENTER, CENTER);
+
+  setupAccessibility();
   setTheme(initialTheme());
 }
 
@@ -104,7 +118,9 @@ function initialTheme() {
 function setTheme(name) {
   themeName = name;
   T = THEMES[name];
-  document.documentElement.dataset.theme = name; // page background follows
+  document.documentElement.dataset.theme = name; // page + HTML controls follow
+  themeButton.querySelector(".label").textContent = name === "dark" ? "Light mode" : "Dark mode";
+  themeButton.setAttribute("aria-label", "Switch to " + (name === "dark" ? "light" : "dark") + " mode");
   try { localStorage.setItem("gapminder-theme", name); } catch (e) {}
 }
 
@@ -121,28 +137,27 @@ function draw() {
     }
   }
 
+  // mouse hover wins; otherwise show the keyboard selection while the chart has focus
+  const keyboardFocus = (hovered == null && selected != null && document.activeElement === cnv.elt);
+  const active = hovered != null ? hovered : (keyboardFocus ? selected : null);
+
   // Draw all bubbles. dimmed when another is hovered (focus mode)
   for (const c of countries) {
-    c.display(hovered);
+    c.display(active);
   }
 
   //  glow on hover
-  if (hovered != null) {
-    hovered.displayGlowing();
+  if (active != null) {
+    active.displayGlowing();
+    if (keyboardFocus) active.drawFocusRing();
   }
 
   // Draw popup last so its on top
-  if (hovered != null) {
-    hovered.drawPopup();
+  if (active != null) {
+    if (keyboardFocus) active.drawPopup(active.x, active.y - active.radius - 8, true);
+    else active.drawPopup(mouseX, mouseY - 50, false);
   }
   drawLegend();
-  drawSearch();
-  drawToggle();
-
-  // pointer feedback for the clickable bits
-  if (overBox(TOGGLE)) cursor(HAND);
-  else if (overBox(SEARCH)) cursor(TEXT);
-  else cursor(ARROW);
 }
 
 function loadData() {
@@ -164,6 +179,9 @@ function loadData() {
     if (countries[i].ppl < minPopulation) minPopulation = countries[i].ppl;
     if (countries[i].ppl > maxPopulation) maxPopulation = countries[i].ppl;
   }
+
+  byIncome = [...countries].sort((a, b) => a.income - b.income);
+  byHealth = [...countries].sort((a, b) => a.health - b.health || a.income - b.income);
 }
 
 // 2018, faded
@@ -180,6 +198,7 @@ function drawYear() {
 //xy ax.
 function drawAxes() {
   stroke(...T.axis);
+  strokeWeight(1);
   line(80, height - 80, width - 50, height - 80); // X
   line(80, 50, 80, height - 80);                 // Y
 
@@ -257,102 +276,129 @@ function drawLegend() {
   }
 }
 
-// rounded box shared by the search field and the theme toggle
-function drawBox(b, active) {
-  noStroke();  // Box background
-  fill(...T.boxBg);
-  rect(b.x, b.y, b.w, b.h, 6);
-
-  // Border change when activ
-  stroke(...(active ? T.boxBorderActive : T.boxBorder));
-  strokeWeight(1);
-  noFill();
-  rect(b.x, b.y, b.w, b.h, 6);
-  noStroke();
-}
-
-// search box top
-function drawSearch() {
-  const b = SEARCH;
-  drawBox(b, searchActive);
-
-  // text settings
-  fill(...T.boxText);
-  textSize(11);
-  textAlign(LEFT, CENTER);
-  const display = searchCountry.length > 0 ? searchCountry : (searchActive ? "" : "Search country...");
-  if (searchCountry.length == 0 && !searchActive) fill(...T.boxPlaceholder);
-  text(display + (searchActive ? "|" : ""), b.x + 10, b.y + b.h / 2);
-}
-
-// dark / light switch, top right: a little sun or moon + the mode it switches to
-function drawToggle() {
-  const b = TOGGLE;
-  drawBox(b, overBox(b));
-
-  const cx = b.x + 18, cy = b.y + b.h / 2;
-  fill(...T.boxText);
-  if (themeName === "dark") {
-    // sun -> switch to light
-    circle(cx, cy, 8);
-    stroke(...T.boxText);
-    strokeWeight(1.2);
-    for (let a = 0; a < TWO_PI; a += QUARTER_PI) {
-      line(cx + cos(a) * 6, cy + sin(a) * 6, cx + cos(a) * 8, cy + sin(a) * 8);
-    }
-    noStroke();
-  } else {
-    // moon -> switch to dark
-    circle(cx, cy, 13);
-    fill(...T.boxBg);
-    circle(cx + 4, cy - 3, 11);
-  }
-
-  fill(...T.boxText);
-  textSize(11);
-  textAlign(LEFT, CENTER);
-  text(themeName === "dark" ? "Light mode" : "Dark mode", b.x + 34, cy);
-}
-
-function overBox(b) {
-  return mouseX >= b.x && mouseX <= b.x + b.w && mouseY >= b.y && mouseY <= b.y + b.h;
-}
-
-// click to activate box
+// click a bubble to select it (same as arrowing to it)
 function mousePressed() {
-  if (overBox(TOGGLE)) {
-    setTheme(themeName === "dark" ? "light" : "dark");
-    return;
-  }
-  // Check if search box clicked
-  if (overBox(SEARCH)) {
-    searchActive = true;
-    return;
-  }
-  searchActive = false;
-}
-
-// keybord x inputs (esc, backspace etc)
-function keyPressed() {
-  if (searchActive) {
-    if (keyCode === BACKSPACE) {
-      if (searchCountry.length > 0) {
-        searchCountry = searchCountry.substring(0, searchCountry.length - 1);
-      }
-      return false;  // stop the browser treating backspace as "go back"
-    } else if (keyCode === ESCAPE) {
-      searchActive = false;
-      searchCountry = "";
-      return false;
+  for (const c of countries) {
+    if (c.bubbleHovered()) {
+      selectCountry(c);
+      return;
     }
   }
 }
 
-// printable characters (incl. space) are typed into the search box
-function keyTyped() {
-  if (searchActive && key.length === 1) {
-    searchCountry += key;
-    return false;  // stop space from scrolling the page while typing
+// ---------- accessibility: HTML controls, keyboard navigation, announcements ----------
+
+function setupAccessibility() {
+  searchInput = document.getElementById("search");
+  themeButton = document.getElementById("theme-toggle");
+  announcer = document.getElementById("announcer");
+
+  // the canvas is a keyboard-operable widget; its instructions are in #chart-help
+  const el = cnv.elt;
+  el.setAttribute("tabindex", "0");
+  el.setAttribute("role", "application");
+  el.setAttribute("aria-roledescription", "interactive bubble chart");
+  el.setAttribute("aria-label", "Gapminder 2018: income versus life expectancy for 187 countries");
+  el.setAttribute("aria-describedby", "chart-help");
+  el.addEventListener("keydown", chartKeydown);
+
+  themeButton.addEventListener("click", () => setTheme(themeName === "dark" ? "light" : "dark"));
+
+  let announceTimer;
+  searchInput.addEventListener("input", () => {
+    searchCountry = searchInput.value;
+    if (selected && !matchesSearch(selected)) selected = null;
+    // tell screen-reader users how many matched, once they pause typing
+    clearTimeout(announceTimer);
+    announceTimer = setTimeout(() => {
+      if (searchCountry.length === 0) return announce("Search cleared.");
+      const n = searchMatches().length;
+      announce(n === 0 ? "No countries match." :
+        n + (n === 1 ? " country matches" : " countries match") + ". Press Enter to go to the chart.");
+    }, 500);
+  });
+  searchInput.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+      searchInput.value = "";
+      searchCountry = "";
+    } else if (e.key === "Enter") {
+      const matches = searchMatches();
+      if (matches.length > 0) {
+        e.preventDefault();
+        cnv.elt.focus();
+        selectCountry(navList(byIncome)[0]);
+      }
+    }
+  });
+
+  buildDataTable();
+}
+
+function chartKeydown(e) {
+  const list = (e.key === "ArrowUp" || e.key === "ArrowDown") ? navList(byHealth) : navList(byIncome);
+  if (list.length === 0) return;
+  const i = selected ? list.indexOf(selected) : -1;
+  let next = null;
+
+  switch (e.key) {
+    case "ArrowRight": case "ArrowUp":
+      next = i < 0 ? list[0] : list[min(i + 1, list.length - 1)]; break;
+    case "ArrowLeft": case "ArrowDown":
+      next = i < 0 ? list[list.length - 1] : list[max(i - 1, 0)]; break;
+    case "Home": next = list[0]; break;
+    case "End": next = list[list.length - 1]; break;
+    case "Escape":
+      selected = null;
+      announce("Selection cleared.");
+      e.preventDefault();
+      return;
+    default: return;
+  }
+  e.preventDefault(); // keep arrow keys from scrolling the page
+  selectCountry(next);
+}
+
+// arrow keys step through search matches when there are any, otherwise every country
+function navList(sorted) {
+  const matches = sorted.filter(matchesSearch);
+  return searchCountry.length > 0 && matches.length > 0 ? matches : sorted;
+}
+
+function matchesSearch(c) {
+  return searchCountry.length > 0 && c.name.toLowerCase().includes(searchCountry.toLowerCase());
+}
+
+function searchMatches() {
+  return countries.filter(matchesSearch);
+}
+
+function selectCountry(c) {
+  selected = c;
+  const list = navList(byIncome);
+  announce(c.describe() + " " + (list.indexOf(c) + 1) + " of " + list.length + " by income.");
+}
+
+function announce(msg) {
+  // clear first so repeating the same message is still read out
+  announcer.textContent = "";
+  setTimeout(() => { announcer.textContent = msg; }, 50);
+}
+
+// same data as the chart, as a real table
+function buildDataTable() {
+  const tbody = document.getElementById("data-rows");
+  for (const c of countries) {
+    const tr = document.createElement("tr");
+    const cells = [c.name, regionNames[c.region] || c.region,
+      nfc(int(c.income)), formatFloat(c.health), nfc(int(c.ppl))];
+    cells.forEach((v, k) => {
+      const td = document.createElement(k === 0 ? "th" : "td");
+      if (k === 0) td.scope = "row";
+      if (k >= 2) td.className = "num";
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
   }
 }
 
@@ -379,6 +425,13 @@ class Country {
     this.x = 0; this.y = 0; this.radius = 0;
   }
 
+  // sentence read out by screen readers
+  describe() {
+    return this.name + ", " + (regionNames[this.region] || this.region) +
+      ". Income $" + nfc(int(this.income)) + " per person, life expectancy " +
+      formatFloat(this.health) + " years, population " + nfc(int(this.ppl)) + ".";
+  }
+
   coordUpdate() {
     const logMin = log(minIncome);
     const logMax = log(maxIncome);
@@ -399,7 +452,7 @@ class Country {
     const clr = this.clr;
     const edge = lerpColor(clr, color(0), T.bubbleEdge);
 
-    const isMatched = searchCountry.length > 0 && this.name.toLowerCase().includes(searchCountry.toLowerCase());
+    const isMatched = matchesSearch(this);
     const isHovered = (this === hovered);
 
     // Dim  others when hovering or searching, focus mode
@@ -427,7 +480,8 @@ class Country {
   displayGlowing() {
     this.coordUpdate();
     const clr = this.clr;
-    const shimmer = 0.5 + 0.5 * sin(frameCount * 0.12); // gentle pulse
+    // gentle pulse (held steady when the user prefers reduced motion)
+    const shimmer = reduceMotion ? 0.75 : 0.5 + 0.5 * sin(frameCount * 0.12);
 
     // outer soft glow
     noStroke();
@@ -438,18 +492,27 @@ class Country {
     }
   }
 
+  // keyboard focus indicator that doesn't rely on colour
+  drawFocusRing() {
+    noFill();
+    stroke(...T.focus);
+    strokeWeight(2);
+    ellipse(this.x, this.y, this.radius * 2 + 8, this.radius * 2 + 8);
+  }
+
   bubbleHovered() {
     return dist(mouseX, mouseY, this.x, this.y) < this.radius;
   }
 
   // popup tab for bubbles with info, popup style
-  drawPopup() {
+  // (ax, ay) = mouse position, or a point just above the bubble when using the keyboard
+  drawPopup(ax, ay, fromKeyboard) {
     const clr = this.clr;
-    let px = mouseX, py = mouseY - 50;
+    let px = ax, py = ay;
     // Keep popup inside canvas
     if (px + 90 > width) px = width - 90;
     if (px - 90 < 0) px = 90;
-    if (py - 40 < 10) py = this.y + this.radius + 50;
+    if (py - 40 < 10) py = this.y + this.radius + (fromKeyboard ? 68 : 50);
     // popup body
     fill(...T.popupBg);
     stroke(red(clr), green(clr), blue(clr), 180);
